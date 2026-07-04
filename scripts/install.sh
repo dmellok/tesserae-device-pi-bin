@@ -12,7 +12,8 @@
 #   2. raspi-config do_spi 0 + do_i2c 0, and dtoverlay=spi0-0cs in config.txt
 #      (SPI bus for pixel data, I2C for the HAT EEPROM auto-detect reads, and
 #       freeing GPIO7/8 so inky can drive chip-select in software)
-#   3. usermod -aG gpio,spi $USER     (group membership for HAT access)
+#   3. usermod -aG gpio,spi,i2c $USER (group membership for HAT access;
+#                                      i2c is needed for the EEPROM read)
 #   4. python3 -m venv .venv          (in the repo directory)
 #   5. .venv/bin/pip install -e .     (project + inky[rpi])
 #   6. interactive prompt → write ~/.config/.../config.toml
@@ -22,7 +23,7 @@
 #                                                  unless --no-service)
 #
 # The group change in step 3 only takes effect on the user's next login.
-# If you've just been added to gpio/spi, log out + back in (or reboot)
+# If you've just been added to gpio/spi/i2c, log out + back in (or reboot)
 # before running --paint-test or relying on the service.
 
 set -euo pipefail
@@ -40,7 +41,7 @@ usage: $0 [options]
 
   --no-service        don't install the systemd unit
   --paint-test        run --paint-test after install (needs fresh login if
-                      the gpio/spi groups were just added)
+                      the gpio/spi/i2c groups were just added)
   --skip-apt          skip apt-get update + install
   --non-interactive   never prompt — write a default config if none exists
   --reconfigure       prompt for MQTT/panel values even if a config exists
@@ -202,7 +203,7 @@ fi
 
 # ----- 3. groups -----
 needs_relogin=false
-for group in gpio spi; do
+for group in gpio spi i2c; do
     if ! getent group "$group" >/dev/null 2>&1; then
         echo "==> group $group does not exist on this system; skipping"
         continue
@@ -352,7 +353,7 @@ fi
 # ----- 9. optional paint test -----
 if $RUN_PAINT_TEST; then
     if $needs_relogin || $needs_reboot; then
-        echo "==> NOT running --paint-test — SPI/I2C and/or gpio/spi group"
+        echo "==> NOT running --paint-test — SPI/I2C and/or gpio/spi/i2c group"
         echo "    membership were just changed and won't take effect until you"
         echo "    reboot (or at least log out + back in)."
     else
@@ -379,7 +380,7 @@ if $needs_reboot; then
     echo "           before rebooting it fails with 'No EEPROM detected'.)"
     echo
 elif $needs_relogin; then
-    echo "  groups:  $USER was added to gpio/spi — LOG OUT + BACK IN (or reboot)"
+    echo "  groups:  $USER was added to gpio/spi/i2c — LOG OUT + BACK IN (or reboot)"
     echo "           before running --paint-test or relying on the service."
     echo
 fi

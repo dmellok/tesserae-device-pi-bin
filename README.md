@@ -45,7 +45,8 @@ That handles, in order:
    `config.txt` — enable SPI (pixels) and I2C (HAT EEPROM auto-detect), and
    free GPIO7/8 so `inky` can drive chip-select in software. Enabling either
    interface or adding the overlay flags a **reboot** at the end.
-3. `usermod -aG gpio,spi $USER` — group membership for HAT access
+3. `usermod -aG gpio,spi,i2c $USER` — group membership for HAT access;
+   `i2c` is needed for the HAT EEPROM read on Inky Impression
 4. `python3 -m venv .venv` + `pip install -e .` — pulls the pinned `inky[rpi]`
 5. **Prompts** for transport (`rest` default — just the Tesserae server URL
    — or `mqtt` for an existing broker setup), device id, transport-specific
@@ -80,7 +81,7 @@ tesserae-pi-bin-client --paint-test     # paints six vertical colour bands
 ```
 --no-service        don't install the systemd unit
 --paint-test        run --paint-test at the end (only useful if you didn't
-                    just get added to gpio/spi)
+                    just get added to gpio/spi/i2c)
 --skip-apt          skip apt update + install (assume packages are present)
 --non-interactive   never prompt — write a default config if none exists
 --reconfigure       re-prompt for MQTT/panel values and overwrite the config
@@ -393,9 +394,10 @@ or a real broker.
   running.
 - **"frame is N bytes; expected M" errors.** The configured `panel.model`
   doesn't match the panel that Tesserae is rendering for. Make them agree.
-- **Permission errors opening SPI.** The user running the daemon needs
-  membership in the `gpio` and `spi` groups. Re-check, then log out and back
-  in.
+- **Permission errors opening SPI or `No EEPROM detected`.** The user running
+  the daemon needs membership in the `gpio`, `spi`, and `i2c` groups (`i2c`
+  is required for the HAT EEPROM read that `inky.auto()` does at startup, not
+  just the SPI pixel path). Re-check with `groups`, then log out and back in.
 - **`--paint-test` fails to import inky.** You're not on a Pi or `inky[rpi]`
   didn't install its RPi-specific deps; that's expected off-Pi.
 
