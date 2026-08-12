@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -283,3 +285,137 @@ def test_render_from_config_round_trip() -> None:
     assert rt.rest.server_url == "http://h:1"
     assert rt.rest.device_token == "t"
     assert rt.rest.poll_interval_s == 120
+
+
+# --- buttons -------------------------------------------------------------------
+
+
+def test_buttons_default_off_with_13_3_pin_c() -> None:
+    """C is GPIO 25 on the 13.3" (16 on the smaller Impressions), and the
+    default panel here is the 13.3"."""
+    cfg = parse_toml(DEFAULT_TOML)
+    assert cfg.buttons.enabled is False
+    assert cfg.buttons.pin_c == 25
+    assert cfg.buttons.pin_actions() == {5: "left", 6: "refresh", 25: "right"}
+
+
+def test_buttons_unmapped_action_is_dropped() -> None:
+    cfg = parse_toml(DEFAULT_TOML)
+    # action_d defaults to "" -> button D is not mapped.
+    assert cfg.buttons.pin_d not in cfg.buttons.pin_actions()
+
+
+def test_buttons_reject_unknown_action() -> None:
+    body = DEFAULT_TOML.replace('action_a = "left"', 'action_a = "rotate_prev"')
+    with pytest.raises(ValueError, match="action_a unknown"):
+        parse_toml(body)
+
+
+def test_buttons_reject_out_of_range_pin() -> None:
+    body = DEFAULT_TOML.replace("pin_a = 5", "pin_a = 999")
+    with pytest.raises(ValueError, match="pin_a must be a BCM pin"):
+        parse_toml(body)
+
+
+def test_buttons_enabled_with_no_mapping_is_rejected() -> None:
+    body = DEFAULT_TOML.replace("enabled = false", "enabled = true")
+    for action in ("action_a", "action_b", "action_c"):
+        body = re.sub(rf'{action} = "[a-z]*"', f'{action} = ""', body)
+    with pytest.raises(ValueError, match="map at least one button"):
+        parse_toml(body)
+
+
+def test_buttons_duplicate_pin_collapses() -> None:
+    """Two buttons on one pin must not produce two watchers on one line."""
+    body = DEFAULT_TOML.replace("pin_b = 6", "pin_b = 5")
+    cfg = parse_toml(body)
+    assert len(cfg.buttons.pin_actions()) == 2
+
+
+# --- rest tz / sse -------------------------------------------------------------
+
+
+def test_rest_tz_and_sse_round_trip() -> None:
+    cfg = parse_toml(DEFAULT_TOML)
+    assert cfg.rest.tz == ""
+    assert cfg.rest.sse_enabled is True
+    updated = replace(cfg, rest=replace(cfg.rest, tz="Australia/Hobart", sse_enabled=False))
+    reparsed = parse_toml(render_from_config(updated))
+    assert reparsed.rest.tz == "Australia/Hobart"
+    assert reparsed.rest.sse_enabled is False
+
+
+def test_sse_enabled_must_be_bool() -> None:
+    body = DEFAULT_TOML.replace("sse_enabled = true", 'sse_enabled = "yes"')
+    with pytest.raises(ValueError, match="sse_enabled must be bool"):
+        parse_toml(body)
+
+
+# --- relay / cache / ota / environment sections --------------------------------
+
+
+def test_relay_defaults_round_trip() -> None:
+    cfg = parse_toml(DEFAULT_TOML)
+    assert cfg.relay.relay_url == "https://relay.tesserae.ink"
+    assert cfg.relay.frame_key == ""
+    assert cfg.relay.private_key == ""
+
+
+def test_relay_mode_requires_a_url() -> None:
+    body = DEFAULT_TOML.replace('transport_mode = "rest"', 'transport_mode = "relay"')
+    body = body.replace('relay_url = "https://relay.tesserae.ink"', 'relay_url = ""')
+    with pytest.raises(ValueError, match="relay_url is required"):
+        parse_toml(body)
+
+
+def test_relay_transport_mode_is_accepted() -> None:
+    body = DEFAULT_TOML.replace('transport_mode = "rest"', 'transport_mode = "relay"')
+    assert parse_toml(body).transport_mode == "relay"
+
+
+def test_dropped_pairing_still_round_trips() -> None:
+    """A revoked pairing legitimately leaves neither key nor code. The daemon
+    writes that state, so the parser must be able to read it back — otherwise
+    a restart after revocation cannot start."""
+    cfg = parse_toml(DEFAULT_TOML.replace('transport_mode = "rest"',
+                                          'transport_mode = "relay"'))
+    dropped = replace(
+        cfg,
+        relay=replace(cfg.relay, frame_key="", pairing_code="", device_token=""),
+    )
+    reparsed = parse_toml(render_from_config(dropped))
+    assert reparsed.relay.frame_key == ""
+
+
+def test_cache_defaults_on_with_xdg_root() -> None:
+    cfg = parse_toml(DEFAULT_TOML)
+    assert cfg.cache.enabled is True
+    assert cfg.cache.root == ""
+    assert cfg.cache.root_path().name == "tesserae-pi-bin-client"
+
+
+def test_cache_root_expands_user() -> None:
+    body = DEFAULT_TOML.replace('root = ""', 'root = "~/frames"')
+    assert "~" not in str(parse_toml(body).cache.root_path())
+
+
+def test_ota_reporting_defaults_on() -> None:
+    assert parse_toml(DEFAULT_TOML).ota.report_enabled is True
+
+
+def test_environment_sensor_defaults_off() -> None:
+    cfg = parse_toml(DEFAULT_TOML)
+    assert cfg.environment.sensor == ""
+    assert cfg.environment.i2c_bus == 1
+
+
+def test_environment_rejects_an_unknown_sensor() -> None:
+    body = DEFAULT_TOML.replace('sensor = ""', 'sensor = "bme280"')
+    with pytest.raises(ValueError, match="sensor unknown"):
+        parse_toml(body)
+
+
+def test_environment_accepts_known_sensors() -> None:
+    for name in ("sht4x", "shtc3"):
+        body = DEFAULT_TOML.replace('sensor = ""', f'sensor = "{name}"')
+        assert parse_toml(body).environment.sensor == name

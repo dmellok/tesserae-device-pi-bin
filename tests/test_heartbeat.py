@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from tesserae_pi_bin_client.heartbeat import (
@@ -9,6 +10,8 @@ from tesserae_pi_bin_client.heartbeat import (
     STATUS_TOPIC_LEGACY,
     Heartbeat,
     Status,
+    _fw_version,
+    _wifi_rssi,
     status_topic,
 )
 
@@ -103,3 +106,68 @@ def test_status_payload_includes_discovery_fields() -> None:
     # fw_version is populated by the default_factory; must be non-empty so
     # the server doesn't show a blank firmware chip on the discovered row.
     assert isinstance(parsed["fw_version"], str) and parsed["fw_version"]
+
+
+# --- telemetry fields added for firmware parity --------------------------------
+
+
+def test_optional_telemetry_omitted_when_unset() -> None:
+    """Omitted, not zeroed: the server must be able to tell "not reported"
+    from "reported as none"."""
+    payload = Status(panel="inky_13_3").payload()
+    for key in ("rssi", "tz", "next_sleep_s", "button", "button_event_id"):
+        assert key not in payload
+
+
+def test_telemetry_included_when_set() -> None:
+    status = Status(panel="inky_13_3")
+    status.rssi = -56
+    status.tz = "Australia/Melbourne"
+    status.next_sleep_s = 300
+    payload = status.payload()
+    assert payload["rssi"] == -56
+    assert payload["tz"] == "Australia/Melbourne"
+    assert payload["next_sleep_s"] == 300
+
+
+def test_button_needs_both_name_and_event_id() -> None:
+    """A half-populated press would be dropped server-side anyway; not
+    sending it keeps the body honest."""
+    status = Status(panel="inky_13_3")
+    status.button = "refresh"
+    assert "button" not in status.payload()
+    status.button_event_id = 12
+    assert status.payload()["button_event_id"] == 12
+
+
+def test_fw_version_is_plain_semver() -> None:
+    """A PEP 440 local segment (+unknown) does not parse as SemVer, so the
+    server's update comparison would reject it."""
+    assert "+" not in _fw_version()
+
+
+def test_wifi_rssi_parses_proc_net_wireless(tmp_path: Path, monkeypatch: Any) -> None:
+    proc = tmp_path / "wireless"
+    proc.write_text(
+        "Inter-| sta-|   Quality        |   Discarded packets\n"
+        " face | tus | link level noise |  nwid  crypt   frag\n"
+        " wlan0: 0000   54.  -56.  -256        0      0      0\n",
+        encoding="utf-8",
+    )
+    real_open = open
+
+    def fake_open(path: Any, *a: Any, **kw: Any) -> Any:
+        if path == "/proc/net/wireless":
+            return real_open(proc, *a, **kw)
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    assert _wifi_rssi() == -56
+
+
+def test_wifi_rssi_none_without_wireless_interface(monkeypatch: Any) -> None:
+    def fake_open(path: Any, *a: Any, **kw: Any) -> Any:
+        raise OSError("no such file")
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    assert _wifi_rssi() is None

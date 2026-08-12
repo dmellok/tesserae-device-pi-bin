@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 import requests
 
+from tesserae_pi_bin_client.button_report import ButtonReport
 from tesserae_pi_bin_client.config import (
     Config,
     HttpConfig,
@@ -115,6 +116,7 @@ class FakeSession:
         self,
         url: str,
         headers: dict[str, str] | None = None,
+        params: dict[str, str] | None = None,
         timeout: float | None = None,
         allow_redirects: bool = True,
         stream: bool = False,
@@ -124,6 +126,9 @@ class FakeSession:
                 "method": "GET",
                 "url": url,
                 "headers": dict(headers or {}),
+                # Queued by URL alone, so a button press changes `params`
+                # without changing the key a test queues against.
+                "params": dict(params or {}),
                 "timeout": timeout,
                 "allow_redirects": allow_redirects,
                 "stream": stream,
@@ -170,6 +175,7 @@ def _config(
     pairing_code: str = "",
     last_frame_etag: str = "",
     poll_interval_s: int = 60,
+    tz: str = "",
 ) -> Config:
     return Config(
         mqtt=MqttConfig(
@@ -186,6 +192,7 @@ def _config(
             pairing_code=pairing_code,
             last_frame_etag=last_frame_etag,
             poll_interval_s=poll_interval_s,
+            tz=tz,
         ),
     )
 
@@ -579,3 +586,178 @@ def test_run_aborts_without_server_url(tmp_path: Path) -> None:
     )
     rc = rest.run(cfg, _status(), lambda p, m: None, threading.Event(), tmp_path / "x.toml")
     assert rc == 2
+
+
+# --- button delivery through the wake cycle -----------------------------------
+
+
+def _paint_noop(packed: bytes, model: str) -> None:
+    del packed, model
+
+
+def test_button_press_rides_the_frame_query(tmp_path: Path) -> None:
+    cfg = _config(device_token="TOK")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    session.queue("GET", f"{BASE}/device/pi_bin/frame", FakeResponse(304))
+    session.queue("POST", f"{BASE}/device/pi_bin/status", FakeResponse(200, {}))
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    report = ButtonReport(seed=77)
+    report.set("refresh")
+
+    _wake_cycle(client, cfg, _status(), _paint_noop, cfg_path, report)
+
+    assert session.calls[0]["params"] == {
+        "button": "refresh",
+        "button_event_id": "77",
+    }
+    # 304 acknowledged it, so /status must NOT carry it too.
+    status_body = json.loads(session.calls[1]["data"])
+    assert "button" not in status_body
+    assert report.pending() is None
+
+
+def test_unacknowledged_frame_falls_back_to_status_delivery(tmp_path: Path) -> None:
+    """A 500 on the frame GET does not prove dispatch — /status delivers it."""
+    cfg = _config(device_token="TOK")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    session.queue("GET", f"{BASE}/device/pi_bin/frame", FakeResponse(500))
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    report = ButtonReport(seed=5)
+    report.set("left")
+    _wake_cycle(client, cfg, _status(), _paint_noop, cfg_path, report)
+
+    # The 500 path returns before /status, so the press is still pending.
+    assert report.status_fields() == {"button": "left", "button_event_id": 5}
+
+
+def test_status_fallback_body_carries_the_press(tmp_path: Path) -> None:
+    cfg = _config(device_token="TOK")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    # Connection error on the frame GET -> not acknowledged, but the cycle
+    # returns early. Drive the fallback directly through a second cycle where
+    # the frame GET fails but the status POST succeeds.
+    session.queue("GET", f"{BASE}/device/pi_bin/frame", FakeResponse(404))
+    session.queue("POST", f"{BASE}/device/pi_bin/status", FakeResponse(200, {}))
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    report = ButtonReport(seed=9)
+    report.set("right")
+    _wake_cycle(client, cfg, _status(), _paint_noop, cfg_path, report)
+
+    status_body = json.loads(session.calls[1]["data"])
+    assert status_body["button"] == "right"
+    assert status_body["button_event_id"] == 9
+    # Delivered; it must not re-fire on the next cycle.
+    assert report.pending() is None
+
+
+def test_no_press_sends_no_button_fields(tmp_path: Path) -> None:
+    cfg = _config(device_token="TOK")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    session.queue("GET", f"{BASE}/device/pi_bin/frame", FakeResponse(304))
+    session.queue("POST", f"{BASE}/device/pi_bin/status", FakeResponse(200, {}))
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    _wake_cycle(client, cfg, _status(), _paint_noop, cfg_path)
+
+    assert session.calls[0]["params"] == {}
+    status_body = json.loads(session.calls[1]["data"])
+    assert "button" not in status_body
+    assert "button_event_id" not in status_body
+
+
+# --- Retry-After + tz ---------------------------------------------------------
+
+
+def test_frame_429_honours_retry_after(tmp_path: Path) -> None:
+    cfg = _config(device_token="TOK", poll_interval_s=60)
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    session.queue(
+        "GET",
+        f"{BASE}/device/pi_bin/frame",
+        FakeResponse(429, headers={"Retry-After": "300"}),
+    )
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    _cfg, next_poll, should_exit = _wake_cycle(
+        client, cfg, _status(), _paint_noop, cfg_path
+    )
+    assert not should_exit
+    assert next_poll == 300
+
+
+def test_frame_429_without_header_uses_poll_interval(tmp_path: Path) -> None:
+    cfg = _config(device_token="TOK", poll_interval_s=90)
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    session.queue("GET", f"{BASE}/device/pi_bin/frame", FakeResponse(429))
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    _cfg, next_poll, _exit = _wake_cycle(client, cfg, _status(), _paint_noop, cfg_path)
+    assert next_poll == 90
+
+
+def test_frame_429_retry_after_is_clamped(tmp_path: Path) -> None:
+    """A hostile header must not pin the daemon at sub-second retries."""
+    cfg = _config(device_token="TOK")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    session.queue(
+        "GET",
+        f"{BASE}/device/pi_bin/frame",
+        FakeResponse(429, headers={"Retry-After": "1"}),
+    )
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    _cfg, next_poll, _exit = _wake_cycle(client, cfg, _status(), _paint_noop, cfg_path)
+    assert next_poll == rest.POLL_INTERVAL_MIN_S
+
+
+def test_status_adopts_and_persists_tz(tmp_path: Path) -> None:
+    cfg = _config(device_token="TOK")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    new_cfg, _next = _apply_status_response(
+        cfg, {"config": {"tz": "Australia/Melbourne"}}, cfg_path
+    )
+    assert new_cfg.rest.tz == "Australia/Melbourne"
+    assert parse_toml(cfg_path.read_text()).rest.tz == "Australia/Melbourne"
+
+
+def test_status_body_reports_tz_and_next_sleep(tmp_path: Path) -> None:
+    cfg = _config(device_token="TOK", poll_interval_s=120, tz="Australia/Perth")
+    cfg_path = tmp_path / "config.toml"
+    save_config(cfg, cfg_path)
+
+    session = FakeSession()
+    session.queue("GET", f"{BASE}/device/pi_bin/frame", FakeResponse(304))
+    session.queue("POST", f"{BASE}/device/pi_bin/status", FakeResponse(200, {}))
+    client = RestClient(SERVER_URL, session=session)  # type: ignore[arg-type]
+
+    _wake_cycle(client, cfg, _status(), _paint_noop, cfg_path)
+
+    body = json.loads(session.calls[1]["data"])
+    assert body["tz"] == "Australia/Perth"
+    assert body["next_sleep_s"] == 120

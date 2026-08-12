@@ -53,7 +53,7 @@ def main() -> int:
         print(f"config already exists at {target}; leaving it alone", file=sys.stderr)
         return 0
 
-    overrides: dict[str, str | int] = {}
+    overrides: dict[str, str | int | bool] = {}
     for env_name, kw in [
         ("T_TRANSPORT_MODE", "transport_mode"),
         ("T_REST_SERVER_URL", "rest_server_url"),
@@ -71,6 +71,20 @@ def main() -> int:
     port = _env_int("T_MQTT_PORT")
     if port is not None:
         overrides["mqtt_port"] = port
+
+    if os.environ.get("T_BUTTONS_ENABLED") == "1":
+        overrides["buttons_enabled"] = True
+
+    # Button C is the one pin that moves between Impression sizes: GPIO 16 on
+    # the 4"/5.7"/7.3", GPIO 25 on the 13.3" (Pimoroni's own examples carry
+    # the same caveat). Derive it from the chosen panel so a fresh install is
+    # correct without the user knowing that, while an explicit override still
+    # wins for a board we haven't seen.
+    pin_c = _env_int("T_BUTTONS_PIN_C")
+    if pin_c is not None:
+        overrides["buttons_pin_c"] = pin_c
+    elif overrides.get("panel_model", "inky_13_3") != "inky_13_3":
+        overrides["buttons_pin_c"] = 16
 
     body = render_config_toml(**overrides)  # type: ignore[arg-type]
 

@@ -26,11 +26,45 @@ def status_topic(device_id: str) -> str:
 
 
 def _fw_version() -> str:
-    """Resolve the installed package version, or a sentinel if not installed."""
+    """Resolve the installed package version as plain SemVer.
+
+    The server compares this against the latest available build to decide
+    whether an update can be offered, so it must parse as SemVer — a PEP 440
+    local-version segment (the `+unknown` we used to emit when running from a
+    source checkout) does not. Strip anything after `+`, matching the sibling
+    firmware, which reports the release tag with the leading `v` removed.
+    """
     try:
-        return version("tesserae-pi-bin-client")
+        raw = version("tesserae-pi-bin-client")
     except PackageNotFoundError:
-        return "0.0.0+unknown"
+        return "0.0.0"
+    return raw.split("+", 1)[0]
+
+
+def _wifi_rssi() -> int | None:
+    """Best-effort WiFi signal level in dBm, or None when not on WiFi.
+
+    Read from /proc/net/wireless (column 4, "level"), which the kernel keeps
+    for every associated wireless interface. A wired Pi has no such interface
+    and gets None — the field is then omitted from the heartbeat rather than
+    reported as a misleading 0.
+    """
+    try:
+        with open("/proc/net/wireless", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return None
+    # Two header lines, then one row per interface: "wlan0: 0000 54. -56. ..."
+    for line in lines[2:]:
+        _, _, rest = line.partition(":")
+        fields = rest.split()
+        if len(fields) < 3:
+            continue
+        try:
+            return int(float(fields[2].rstrip(".")))
+        except ValueError:
+            continue
+    return None
 
 
 def _primary_ip() -> str:
@@ -73,9 +107,22 @@ class Status:
     panel_h: int = 0
     fw_version: str = field(default_factory=_fw_version)
     ip: str = ""
+    # Telemetry the sibling firmware reports on every beat. Each is omitted
+    # from the payload when unset rather than sent as a zero/empty sentinel,
+    # so the server can tell "not reported" from "reported as none".
+    rssi: int | None = None
+    tz: str = ""
+    # The interval this client intends to sleep for after the current beat.
+    # Lets the server predict the next contact without inferring it from the
+    # cadence it pushed.
+    next_sleep_s: int | None = None
+    # Pending physical-button press, delivered here only when the frame GET
+    # could not carry it (see button_report.BUTTON_REPORT_FALLBACK_NOTE).
+    button: str = ""
+    button_event_id: int | None = None
 
     def payload(self) -> dict[str, Any]:
-        return {
+        body: dict[str, Any] = {
             "state": self.state,
             "last_paint_at": self.last_paint_at,
             "last_error": self.last_error,
@@ -88,6 +135,16 @@ class Status:
             "panel_h": self.panel_h,
             "ip": self.ip,
         }
+        if self.rssi is not None:
+            body["rssi"] = self.rssi
+        if self.tz:
+            body["tz"] = self.tz
+        if self.next_sleep_s is not None:
+            body["next_sleep_s"] = self.next_sleep_s
+        if self.button and self.button_event_id is not None:
+            body["button"] = self.button
+            body["button_event_id"] = self.button_event_id
+        return body
 
     def to_json(self) -> bytes:
         return json.dumps(self.payload()).encode("utf-8")
