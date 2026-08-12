@@ -9,7 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
-from .config import DEFAULT_CONFIG_PATH, Config, load_config, with_rest_updates
+from .config import (
+    DEFAULT_CONFIG_PATH,
+    Config,
+    load_config,
+    save_config,
+    with_relay_updates,
+    with_rest_updates,
+)
 from .heartbeat import Status, _primary_ip
 from .paint import auto_panel, detected_model_or, paint
 from .panels import PANEL_DIMS, buffer_size
@@ -126,6 +133,15 @@ def _do_run(config: Config, config_path: Path) -> int:
 
         return rest.run(config, status, paint_fn, shutdown, config_path)
 
+    if config.transport_mode == "relay":
+        log.info(
+            "transport_mode=relay; polling the cloud mailbox at %s",
+            config.relay.relay_url,
+        )
+        from .transports import relay
+
+        return relay.run(config, status, paint_fn, shutdown, config_path)
+
     log.info("transport_mode=mqtt; using MQTT broker at %s:%d", config.mqtt.host, config.mqtt.port)
     from .transports import mqtt
 
@@ -140,9 +156,11 @@ def _apply_pair_flag(config: Config, pair_code: str, config_path: Path) -> Confi
     saved. If the user pre-empts the daemon (Ctrl-C before pairing
     completes), the next run starts fresh and they re-supply --pair.
     """
+    if config.transport_mode == "relay":
+        return _apply_relay_pair_flag(config, pair_code, config_path)
     if config.transport_mode != "rest":
         raise SystemExit(
-            "--pair only applies when transport_mode = 'rest' "
+            "--pair only applies when transport_mode = 'rest' or 'relay' "
             f"(current: {config.transport_mode!r})"
         )
     if config.rest.device_token:
@@ -155,6 +173,33 @@ def _apply_pair_flag(config: Config, pair_code: str, config_path: Path) -> Confi
     if config.rest.pairing_code and config.rest.pairing_code != pair_code:
         log.info("--pair overrides config.rest.pairing_code for this run")
     return with_rest_updates(config, pairing_code=pair_code)
+
+
+def _apply_relay_pair_flag(config: Config, pair_code: str, config_path: Path) -> Config:
+    """--pair for the relay transport.
+
+    Persisted, unlike the REST path: relay pairing spans restarts by design
+    (the code has no expiry once submitted, and home may take a while to
+    complete the exchange), so the code has to survive a reboot mid-pairing.
+
+    A code supplied while a different pairing is already half-done clears the
+    stored private key, since that key is bound to the code it was submitted
+    with — reusing it against a new code would derive a frame key home never
+    agrees with, and the only symptom would be frames that never appear.
+    """
+    if config.relay.frame_key:
+        log.warning(
+            "--pair ignored: this panel is already relay-paired (frame_key is "
+            "set in %s). Clear [relay].frame_key and re-run to re-pair.",
+            config_path,
+        )
+        return config
+    if config.relay.private_key and config.relay.pairing_code != pair_code:
+        log.info("--pair supplies a new code; discarding the half-done pairing")
+        config = with_relay_updates(config, private_key="")
+    config = with_relay_updates(config, pairing_code=pair_code)
+    save_config(config, config_path)
+    return config
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -179,9 +224,10 @@ def run(argv: list[str] | None = None) -> int:
         "--pair",
         metavar="CODE",
         default=None,
-        help="REST mode only: present this pairing code to the server on first "
-        "run. Overrides [rest].pairing_code from config. Ignored if a "
-        "device_token is already saved.",
+        help="Pair this panel. In rest mode: present the code to the server on "
+        "first run (overrides [rest].pairing_code; ignored once a device_token "
+        "is saved). In relay mode: start the cloud rendezvous with a code from "
+        "Settings -> Cloud relay (persisted, since pairing can span restarts).",
     )
     args = parser.parse_args(argv)
 

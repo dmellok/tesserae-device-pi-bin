@@ -24,6 +24,9 @@ dependencies = [
     # show() handling per-driver orientation + dual-controller plumbing.
     # Bumping this requires re-running --paint-test on real hardware.
     "inky[rpi]==2.4.0",
+    # relay_crypto.py: X25519 + HKDF-SHA256 + AES-256-GCM for the cloud-relay
+    # transport, pinned to docs/relay/contract.md's golden vectors.
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]
@@ -67,8 +70,17 @@ module = ["tesserae_pi_bin_client.paint", "tesserae_pi_bin_client.main"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["paho.*", "inky.*"]
+# Imported lazily and only on a Pi; none of them ship stubs.
+module = ["paho.*", "inky.*", "gpiod.*", "gpiodevice.*", "smbus2.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Contract modules added for firmware parity — strict, same as the rest.
+module = [
+    "tesserae_pi_bin_client.button_report",
+    "tesserae_pi_bin_client.transports.sse",
+]
+strict = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

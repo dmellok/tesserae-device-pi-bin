@@ -295,6 +295,17 @@ collect_config_via_prompts() {
     # Strip the "(WxH)" suffix from the choice — keep just the model id.
     panel_model="${panel_model%% *}"
     echo
+
+    echo "    The Impression's four front buttons can drive the panel:"
+    echo "      A = previous page, B = refresh, C = next page."
+    echo "    Enable only if your HAT has them wired and libgpiod is present;"
+    echo "    frames paint the same either way."
+    prompt_default buttons_enabled "Enable front buttons? (y/N)" "n"
+    case "${buttons_enabled,,}" in
+        y|yes) buttons_enabled="1" ;;
+        *)     buttons_enabled="" ;;
+    esac
+    echo
 }
 
 write_config() {
@@ -311,6 +322,7 @@ write_config() {
         T_MQTT_CLIENT_ID="${mqtt_client_id:-}" \
         T_DEVICE_ID="${device_id:-}" \
         T_PANEL_MODEL="${panel_model:-}" \
+        T_BUTTONS_ENABLED="${buttons_enabled:-}" \
         T_OVERWRITE="$1" \
         "$VENV_DIR/bin/python" -m tesserae_pi_bin_client.bootstrap_config
 }
