@@ -162,6 +162,12 @@ report_enabled = true
 sensor = ""          # "" | sht4x | shtc3
 i2c_bus = 1
 
+[battery]
+# Optional PiSugar UPS. pisugar3 reads the gauge over I2C directly;
+# pisugar-server asks PiSugar's power manager on 127.0.0.1:8423.
+source = ""          # "" | pisugar3 | pisugar-server
+i2c_bus = 1
+
 [http]
 download_timeout_s = 30
 max_frame_bytes = 16000000
@@ -319,7 +325,9 @@ payload (`{state, last_paint_at, last_error, last_digest, uptime_s, fw_version,
 panel, kind, panel_w, panel_h, ip}`), plus, when available, `rssi`, `tz` and
 `next_sleep_s`. Each optional field is **omitted rather than zeroed** when it
 has no value, so the server can tell "not reported" from "reported as none".
-Battery / wake_reason fields stay absent — a mains-powered Pi has neither.
+`battery_pct` / `battery_mv` / `power_plugged` appear only with a
+[PiSugar UPS configured](#battery-telemetry); `wake_reason` stays absent, a
+Pi never deep-sleeps.
 
 Response: `{status, config: {sleep_interval_s?, tz?}, next_poll_s?,
 server_time}`. `config.sleep_interval_s` is durable (persisted to
@@ -529,6 +537,36 @@ omits the fields rather than interrupting the heartbeat.
 The Pi's own CPU temperature is deliberately **not** reported here: the
 server's field means ambient room temperature, and a SoC running 30 °C
 above the room would quietly poison anything plotted from it.
+
+## Battery telemetry
+
+A Pi has no battery of its own, so the heartbeat leaves the battery fields
+out and the server shows the device as mains-powered. Add a **PiSugar 3**
+(or 3 Plus) UPS and the panel keeps painting through a power cut; tell the
+client how to read it and the server's battery tile, history chart,
+`device_battery` widget and Home Assistant battery / low-battery sensors
+light up, the same way they do for the ESP32 firmware:
+
+```toml
+[battery]
+source = "pisugar3"          # or "pisugar-server"
+```
+
+`pisugar3` reads the gauge straight off the HAT's I²C bus (address `0x57`,
+the shipped default): three registers, nothing to install. `pisugar-server`
+asks PiSugar's own power manager on `127.0.0.1:8423` instead, for setups
+that already run it for the web UI and would rather one process owned the
+bus. Both report `battery_pct`, `battery_mv`, `battery_source` and
+`power_plugged`, the last of which is what tells a UPS sitting at 100 %
+apart from a panel running down.
+
+The gauge's own percentage is reported, never one derived from voltage:
+PiSugar's curve is the one its charge-protection cap (about 80 % when
+enabled) is measured against. Reads are plausibility-checked and
+best-effort; a failed read omits the fields for that beat and the tile
+falls back to "Mains". The PiSugar manager polls the same bus, so a
+collision costs one beat rather than being latched. The fields ride the
+REST status POST only, like the environment sensor.
 
 ## Wire format (the `.bin` files)
 
