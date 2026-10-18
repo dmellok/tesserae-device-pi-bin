@@ -31,6 +31,9 @@ BUTTON_ACTIONS = {"refresh", "left", "right"}
 # Ambient sensors the environment module knows how to read.
 ENV_SENSORS = {"sht4x", "shtc3"}
 
+# Battery sources the battery module knows how to read.
+BATTERY_SOURCES = {"pisugar3", "pisugar-server"}
+
 
 def _toml_str(value: str) -> str:
     """Render a TOML basic-string literal with the bare-minimum escaping."""
@@ -84,6 +87,8 @@ def render_config_toml(
     ota_report_enabled: bool = True,
     env_sensor: str = "",
     env_i2c_bus: int = 1,
+    battery_source: str = "",
+    battery_i2c_bus: int = 1,
 ) -> str:
     """Build a config.toml body from arbitrary overrides.
 
@@ -184,6 +189,13 @@ def render_config_toml(
         "             # \"\" | sht4x | shtc3\n"
         f"i2c_bus = {env_i2c_bus}\n"
         "\n"
+        "[battery]\n"
+        "# Optional PiSugar UPS. pisugar3 reads the gauge over I2C directly;\n"
+        "# pisugar-server asks PiSugar's power manager on 127.0.0.1:8423.\n"
+        f"source = {_toml_str(battery_source)}"
+        "             # \"\" | pisugar3 | pisugar-server\n"
+        f"i2c_bus = {battery_i2c_bus}\n"
+        "\n"
         "[http]\n"
         f"download_timeout_s = {download_timeout_s}\n"
         f"max_frame_bytes = {max_frame_bytes}\n"
@@ -258,6 +270,14 @@ class EnvironmentConfig:
     """Optional ambient sensor on the HAT's I²C bus."""
 
     sensor: str = ""
+    i2c_bus: int = 1
+
+
+@dataclass(frozen=True)
+class BatteryConfig:
+    """Optional PiSugar UPS, read over I²C or via pisugar-server."""
+
+    source: str = ""
     i2c_bus: int = 1
 
 
@@ -343,6 +363,7 @@ class Config:
     cache: CacheConfig = CacheConfig()
     ota: OtaConfig = OtaConfig()
     environment: EnvironmentConfig = EnvironmentConfig()
+    battery: BatteryConfig = BatteryConfig()
 
 
 def _require(section: dict[str, Any], key: str, kind: type, where: str) -> Any:
@@ -614,6 +635,29 @@ def _parse(raw: dict[str, Any]) -> Config:
     ):
         raise ValueError("[environment].i2c_bus must be a non-negative integer")
 
+    battery_section = raw.get("battery", {})
+    if not isinstance(battery_section, dict):
+        raise ValueError("[battery] must be a table")
+    battery = BatteryConfig(
+        source=battery_section.get("source", ""),
+        i2c_bus=battery_section.get("i2c_bus", 1),
+    )
+    if not isinstance(battery.source, str):
+        raise ValueError(
+            f"[battery].source must be str, got {type(battery.source).__name__}"
+        )
+    if battery.source and battery.source not in BATTERY_SOURCES:
+        raise ValueError(
+            f"[battery].source unknown: {battery.source!r} "
+            f"(expected one of {sorted(BATTERY_SOURCES)}, or \"\" for none)"
+        )
+    if (
+        not isinstance(battery.i2c_bus, int)
+        or isinstance(battery.i2c_bus, bool)
+        or battery.i2c_bus < 0
+    ):
+        raise ValueError("[battery].i2c_bus must be a non-negative integer")
+
     return Config(
         mqtt=mqtt,
         panel=panel,
@@ -626,6 +670,7 @@ def _parse(raw: dict[str, Any]) -> Config:
         cache=cache,
         ota=ota,
         environment=environment,
+        battery=battery,
     )
 
 
@@ -693,6 +738,8 @@ def render_from_config(cfg: Config) -> str:
         ota_report_enabled=cfg.ota.report_enabled,
         env_sensor=cfg.environment.sensor,
         env_i2c_bus=cfg.environment.i2c_bus,
+        battery_source=cfg.battery.source,
+        battery_i2c_bus=cfg.battery.i2c_bus,
     )
 
 

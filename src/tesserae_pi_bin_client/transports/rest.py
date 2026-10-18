@@ -28,6 +28,8 @@ from typing import Any
 
 import requests
 
+from ..battery import BatteryMonitor
+from ..battery import payload_for as battery_payload
 from ..button_report import ButtonReport, frame_status_acknowledges
 from ..cache_sync import CacheManager
 from ..config import Config, RestConfig, save_config, with_rest_updates
@@ -623,9 +625,10 @@ def _sleep_until_wake(
 
 
 class Telemetry:
-    """Optional heartbeat extras: OTA lifecycle state and an ambient sensor.
+    """Optional heartbeat extras: OTA lifecycle state, an ambient sensor and
+    a UPS battery.
 
-    Both are additive and independently gated. Kept together so the wake cycle
+    All three are additive and independently gated. Kept together so the wake cycle
     has one place to ask for "everything else that rides the status body".
     """
 
@@ -643,12 +646,18 @@ class Telemetry:
                 config.environment.sensor, config.environment.i2c_bus
             )
 
+        self._battery: BatteryMonitor | None = None
+        if config.battery.source:
+            self._battery = BatteryMonitor(config.battery.source, config.battery.i2c_bus)
+
     def payload(self) -> dict[str, Any]:
         out: dict[str, Any] = {}
         if self._ota is not None:
             out["ota"] = self._ota.payload()
         if self._sensor is not None:
             out.update(env_payload(self._sensor.read()))
+        if self._battery is not None:
+            out.update(battery_payload(self._battery.read()))
         return out
 
 

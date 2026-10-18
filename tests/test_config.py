@@ -419,3 +419,28 @@ def test_environment_accepts_known_sensors() -> None:
     for name in ("sht4x", "shtc3"):
         body = DEFAULT_TOML.replace('sensor = ""', f'sensor = "{name}"')
         assert parse_toml(body).environment.sensor == name
+
+
+def test_battery_defaults_off() -> None:
+    cfg = parse_toml(DEFAULT_TOML)
+    assert cfg.battery.source == ""
+    assert cfg.battery.i2c_bus == 1
+
+
+def test_battery_rejects_an_unknown_source() -> None:
+    body = DEFAULT_TOML.replace('source = ""', 'source = "ups-pico"')
+    with pytest.raises(ValueError, match="source unknown"):
+        parse_toml(body)
+
+
+def test_battery_accepts_known_sources() -> None:
+    for name in ("pisugar3", "pisugar-server"):
+        body = DEFAULT_TOML.replace('source = ""', f'source = "{name}"')
+        assert parse_toml(body).battery.source == name
+
+
+def test_battery_round_trips_through_save(tmp_path: Path) -> None:
+    body = DEFAULT_TOML.replace('source = ""', 'source = "pisugar3"')
+    cfg = parse_toml(body)
+    save_config(cfg, tmp_path / "config.toml")
+    assert parse_toml((tmp_path / "config.toml").read_text()).battery.source == "pisugar3"
